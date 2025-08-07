@@ -141,7 +141,7 @@ export default function ZipCleaner() {
       <Card className="w-full max-w-3xl rounded-xl border border-gray-200 bg-white p-6 shadow-2xl md:p-8 lg:p-10">
         {/* HEADER */}
         <div className="space-y-2 text-center">
-          <h1 className="text-3xl font-bold tracking-tight text-gray-800 md:text-4xl">
+          <h1 className="text-3xl font-bold tracking-tight text-blue-800 md:text-4xl">
             ✨ ZIP Cleaner
           </h1>
           <p className="text-sm text-gray-500 md:text-base">
