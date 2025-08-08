@@ -138,9 +138,9 @@ export default function ZipCleaner() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 p-4 sm:p-6">
-      <Card className="w-full max-w-3xl rounded-xl border border-gray-200 bg-white p-6 shadow-2xl md:p-8 lg:p-10">
+      <Card className="w-full max-w-3xl rounded-xl border border-gray-200 bg-white p-4">
         {/* HEADER */}
-        <div className="space-y-2 text-center">
+        <div className="text-center">
           <h1 className="text-3xl font-bold tracking-tight text-blue-800 md:text-4xl">
             ✨ ZIP Cleaner
           </h1>
@@ -151,7 +151,7 @@ export default function ZipCleaner() {
         </div>
 
         {/* FILE UPLOAD */}
-        <div className="py-6">
+        <div>
           {!file ? (
             <div
               {...getRootProps()}
@@ -187,7 +187,7 @@ export default function ZipCleaner() {
         </div>
 
         {/* ACTIONS */}
-        <div className="mt-6 flex flex-col items-center gap-4">
+        <div className="flex flex-col items-center gap-4">
           <Button
             className="w-full px-6 py-3 text-base font-semibold tracking-wide sm:w-auto"
             size="lg"
