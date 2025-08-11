@@ -31,10 +31,32 @@ export default function ZipCleaner() {
   const [rndStates, setRndStates] = useState<Record<string, { width: number; height: number; x: number; y: number }>>({});
   const [isStaging, setIsStaging] = useState<boolean>(false);
   const editorImageRefs = useRef<Record<string, HTMLImageElement | null>>({});
+  const [isShiftDown, setIsShiftDown] = useState(false);
 
   // Saved backgrounds state (now from Dexie)
   const savedBackgrounds = useLiveQuery(() => db.backgrounds.toArray(), []);
   const [selectedBackgrounds, setSelectedBackgrounds] = useState<SavedBackground[]>([]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setIsShiftDown(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setIsShiftDown(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     const filters = localStorage.getItem("zip-cleaner-filters");
@@ -202,6 +224,7 @@ export default function ZipCleaner() {
       }
       setMockups(prev => [...prev, ...newMockups]);
       toast.success("Mockups staged successfully!");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (error: any) {
       toast.error(`Error staging mockups: ${error.message}`);
     } finally {
@@ -456,7 +479,7 @@ saveAs(blob, "merged.pdf");
           </p>
         </div>
 
-        <div className="flex flex-col lg:flex-row gap-6">
+        <div className="flex flex-col gap-6">
           {/* Left Column: Core Functionality */}
           <div className="flex-1 space-y-6">
             <h2 className="text-xl font-semibold text-gray-800 border-b pb-2">📦 Core ZIP Functions</h2>
@@ -657,6 +680,7 @@ saveAs(blob, "merged.pdf");
                           size={{ width: rndStates[bg.id!].width, height: rndStates[bg.id!].height }}
                           position={{ x: rndStates[bg.id!].x, y: rndStates[bg.id!].y }}
                           onDragStop={(e, d) => setRndStates(prev => ({ ...prev, [bg.id!]: { ...prev[bg.id!], x: d.x, y: d.y } }))}
+                          lockAspectRatio={isShiftDown}
                           onResizeStop={(e, direction, ref, delta, position) => {
                             setRndStates(prev => ({
                               ...prev,
