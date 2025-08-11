@@ -18,6 +18,7 @@ export default function ZipCleaner() {
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [hasPdfs, setHasPdfs] = useState<boolean>(false);
   const [isMerging, setIsMerging] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [savedFilters, setSavedFilters] = useState<Record<string, string[]>>(
     {}
   );
@@ -176,7 +177,7 @@ export default function ZipCleaner() {
       }
 
       const mergedPdfBytes = await mergedPdf.save();
-      const blob = new Blob([Uint8Array.from(mergedPdfBytes)], { type: "application/pdf" });
+      const blob = new Blob([new Uint8Array(mergedPdfBytes)], { type: "application/pdf" });
       saveAs(blob, "merged.pdf");
     };
 
@@ -185,6 +186,73 @@ export default function ZipCleaner() {
       success: "PDFs merged and downloaded!",
       error: (err) => err.message,
       finally: () => setIsMerging(false),
+    });
+  };
+
+  const cleanMergeAndDownload = async () => {
+    if (!file) {
+      toast.error("Please upload a ZIP file first.");
+      return;
+    }
+    setIsProcessing(true);
+
+    const promise = async () => {
+      const zip = await JSZip.loadAsync(file);
+      const newZip = new JSZip();
+
+      // 1. Clean the zip
+      const promises: Promise<void>[] = [];
+      zip.forEach((relativePath, zipEntry) => {
+        if (!selectedFiles.includes(zipEntry.name)) {
+          promises.push(
+            zipEntry.async("blob").then((content) => {
+              newZip.file(zipEntry.name, content);
+            })
+          );
+        }
+      });
+      await Promise.all(promises);
+
+      // 2. Merge PDFs
+      const pdfFiles = zip.filter((relativePath, file) =>
+        file.name.toLowerCase().endsWith(".pdf")
+      );
+
+      if (pdfFiles.length > 0) {
+        pdfFiles.sort((a, b) => {
+          const numA = parseFloat(a.name.replace(/\.pdf$/i, ''));
+          const numB = parseFloat(b.name.replace(/\.pdf$/i, ''));
+          return numA - numB;
+        });
+
+        const mergedPdf = await PDFDocument.create();
+        for (const pdfFile of pdfFiles) {
+          const pdfBytes = await pdfFile.async("uint8array");
+          const pdf = await PDFDocument.load(pdfBytes);
+          const copiedPages = await mergedPdf.copyPages(
+            pdf,
+            pdf.getPageIndices()
+          );
+          copiedPages.forEach((page) => {
+            mergedPdf.addPage(page);
+          });
+        }
+        const mergedPdfBytes = await mergedPdf.save();
+
+        // 3. Add merged PDF to the new zip
+        newZip.file("merged.pdf", mergedPdfBytes);
+      }
+
+      // 4. Download the final zip
+      const content = await newZip.generateAsync({ type: "blob" });
+      saveAs(content, "cleaned_and_merged.zip");
+    };
+
+    toast.promise(promise, {
+      loading: "Processing...",
+      success: "ZIP file created and downloaded!",
+      error: (err) => err.message || "An error occurred.",
+      finally: () => setIsProcessing(false),
     });
   };
 
@@ -221,7 +289,9 @@ export default function ZipCleaner() {
                   ? "Drop your ZIP here..."
                   : "Drag & drop a ZIP file here, or click to select one"}
               </p>
-              <p className="mt-1 text-xs text-gray-400">(Max file size: 500MB)</p>
+              <p className="mt-1 text-xs text-gray-400">
+                (Max file size: 500MB)
+              </p>
             </div>
           ) : (
             <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 p-3">
@@ -231,7 +301,12 @@ export default function ZipCleaner() {
                   {file.name}
                 </span>
               </div>
-              <Button variant="ghost" size="sm" onClick={clearFile} className="text-red-500 hover:text-red-600">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearFile}
+                className="text-red-500 hover:text-red-600"
+              >
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -245,7 +320,7 @@ export default function ZipCleaner() {
               className="px-6 py-3 text-base font-semibold tracking-wide"
               size="lg"
               onClick={cleanZip}
-              disabled={!file}
+              disabled={!file || isProcessing}
             >
               🚀 Clean and Download ZIP
             </Button>
@@ -253,9 +328,17 @@ export default function ZipCleaner() {
               className="px-6 py-3 text-base font-semibold tracking-wide"
               size="lg"
               onClick={mergePdfs}
-              disabled={!file || !hasPdfs || isMerging}
+              disabled={!file || !hasPdfs || isMerging || isProcessing}
             >
               📄 Merge PDFs
+            </Button>
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={cleanMergeAndDownload}
+              disabled={!file || isProcessing}
+            >
+              ✨ Clean, Merge & Download
             </Button>
           </div>
           <p className="text-muted-foreground flex items-center text-sm">
