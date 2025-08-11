@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { saveAs } from "file-saver";
 import JSZip from "jszip";
 import { File as FileIcon, ShieldCheck, UploadCloud, X } from "lucide-react";
+import { PDFDocument } from "pdf-lib";
 import { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
@@ -15,6 +16,8 @@ export default function ZipCleaner() {
   const [file, setFile] = useState<File | null>(null);
   const [zipFiles, setZipFiles] = useState<Option[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [hasPdfs, setHasPdfs] = useState<boolean>(false);
+  const [isMerging, setIsMerging] = useState<boolean>(false);
   const [savedFilters, setSavedFilters] = useState<Record<string, string[]>>(
     {}
   );
@@ -39,6 +42,7 @@ export default function ZipCleaner() {
         }));
         setZipFiles(files);
         setSelectedFiles([]);
+        setHasPdfs(files.some((f) => f.value.toLowerCase().endsWith(".pdf")));
       } catch (error) {
         toast.error("Failed to read ZIP file.");
         console.error(error);
@@ -99,6 +103,7 @@ export default function ZipCleaner() {
     setFile(null);
     setZipFiles([]);
     setSelectedFiles([]);
+    setHasPdfs(false);
     toast.info("File cleared.");
   };
 
@@ -133,6 +138,53 @@ export default function ZipCleaner() {
       loading: "Processing...",
       success: "Downloaded!",
       error: "Error: Invalid ZIP file or processing failed.",
+    });
+  };
+
+  const mergePdfs = async () => {
+    if (!file) {
+      toast.error("Please upload a ZIP file first.");
+      return;
+    }
+    setIsMerging(true);
+
+    const promise = async () => {
+      const zip = await JSZip.loadAsync(file);
+      const pdfFiles = zip.filter((relativePath, file) =>
+        file.name.toLowerCase().endsWith(".pdf")
+      );
+
+      pdfFiles.sort((a, b) => {
+        const numA = parseFloat(a.name.replace(/\.pdf$/i, ''));
+        const numB = parseFloat(b.name.replace(/\.pdf$/i, ''));
+        return numA - numB;
+      });
+
+      if (pdfFiles.length === 0) {
+        throw new Error("No PDF files found in the ZIP.");
+      }
+
+      const mergedPdf = await PDFDocument.create();
+
+      for (const pdfFile of pdfFiles) {
+        const pdfBytes = await pdfFile.async("uint8array");
+        const pdf = await PDFDocument.load(pdfBytes);
+        const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => {
+          mergedPdf.addPage(page);
+        });
+      }
+
+      const mergedPdfBytes = await mergedPdf.save();
+      const blob = new Blob([Uint8Array.from(mergedPdfBytes)], { type: "application/pdf" });
+      saveAs(blob, "merged.pdf");
+    };
+
+    toast.promise(promise, {
+      loading: "Merging PDFs...",
+      success: "PDFs merged and downloaded!",
+      error: (err) => err.message,
+      finally: () => setIsMerging(false),
     });
   };
 
@@ -188,14 +240,24 @@ export default function ZipCleaner() {
 
         {/* ACTIONS */}
         <div className="flex flex-col items-center gap-4">
-          <Button
-            className="w-full px-6 py-3 text-base font-semibold tracking-wide sm:w-auto"
-            size="lg"
-            onClick={cleanZip}
-            disabled={!file}
-          >
-            🚀 Clean and Download ZIP
-          </Button>
+          <div className="flex flex-wrap justify-center gap-4">
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={cleanZip}
+              disabled={!file}
+            >
+              🚀 Clean and Download ZIP
+            </Button>
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={mergePdfs}
+              disabled={!file || !hasPdfs || isMerging}
+            >
+              📄 Merge PDFs
+            </Button>
+          </div>
           <p className="text-muted-foreground flex items-center text-sm">
             <ShieldCheck className="mr-2 h-4 w-4 text-green-500" />
             100% private. No uploads. No servers.
