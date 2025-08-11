@@ -3,7 +3,9 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { MultiSelect, Option } from "@/components/ui/multi-select";
+import { db, SavedBackground } from "@/db";
 import { cn } from "@/lib/utils";
+import { useLiveQuery } from "dexie-react-hooks";
 import { saveAs } from "file-saver";
 import JSZip from "jszip";
 import { File as FileIcon, Image as ImageIcon, ShieldCheck, UploadCloud, X } from "lucide-react";
@@ -24,28 +26,20 @@ export default function ZipCleaner() {
   const [savedFilters, setSavedFilters] = useState<Record<string, string[]>>({});
 
   // Mockup feature state
-  const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
   const [foregroundImage, setForegroundImage] = useState<string | null>(null);
   const [mockups, setMockups] = useState<string[]>([]);
-  const [rndState, setRndState] = useState({
-    width: 200,
-    height: 200,
-    x: 50,
-    y: 50,
-  });
-  const bgRef = useRef<HTMLImageElement>(null);
+  const [rndStates, setRndStates] = useState<Record<string, { width: number; height: number; x: number; y: number }>>({});
+  const [isStaging, setIsStaging] = useState<boolean>(false);
+  const editorImageRefs = useRef<Record<string, HTMLImageElement | null>>({});
 
-  // Saved backgrounds state
-  const [savedBackgrounds, setSavedBackgrounds] = useState<{ name: string; dataUrl: string }[]>([]);
+  // Saved backgrounds state (now from Dexie)
+  const savedBackgrounds = useLiveQuery(() => db.backgrounds.toArray(), []);
+  const [selectedBackgrounds, setSelectedBackgrounds] = useState<SavedBackground[]>([]);
 
   useEffect(() => {
     const filters = localStorage.getItem("zip-cleaner-filters");
     if (filters) {
       setSavedFilters(JSON.parse(filters));
-    }
-    const backgrounds = localStorage.getItem("zip-cleaner-backgrounds");
-    if (backgrounds) {
-      setSavedBackgrounds(JSON.parse(backgrounds));
     }
   }, []);
 
@@ -64,16 +58,20 @@ export default function ZipCleaner() {
         setSelectedFiles([]);
         setHasPdfs(files.some((f) => f.value.toLowerCase().endsWith(".pdf")));
 
-        // Find and set foreground image for mockup
         const pngFile = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.png') && !f.dir);
         if (pngFile) {
           const blob = await pngFile.async('blob');
           setForegroundImage(URL.createObjectURL(blob));
           toast.success("Found a PNG image in the ZIP for mockups.");
-          // Reset Rnd state for new foreground image
-          setRndState({ width: 200, height: 200, x: 50, y: 50 });
+
+          // Auto-select all backgrounds from Dexie
+          const allDbBackgrounds = await db.backgrounds.toArray();
+          setSelectedBackgrounds(allDbBackgrounds);
+
         } else {
           setForegroundImage(null);
+          setSelectedBackgrounds([]);
+          setRndStates({});
         }
 
       } catch (error) {
@@ -93,22 +91,27 @@ export default function ZipCleaner() {
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
       const reader = new FileReader();
-      reader.onload = (e) => {
+      reader.onload = async (e) => {
         const dataUrl = e.target?.result as string;
-        setBackgroundImage(dataUrl);
-        toast.info("Background image loaded.");
-
-        const bgName = prompt("Enter a name for this background (optional):");
+        const bgName = prompt("Enter a name for this background:");
         if (bgName) {
-          const newSavedBackgrounds = [...savedBackgrounds, { name: bgName, dataUrl }];
-          setSavedBackgrounds(newSavedBackgrounds);
-          localStorage.setItem("zip-cleaner-backgrounds", JSON.stringify(newSavedBackgrounds));
-          toast.success(`Background "${bgName}" saved!`);
+          try {
+            const newBg: SavedBackground = { name: bgName, dataUrl };
+            const id = await db.backgrounds.add(newBg);
+            toast.success(`Background "${bgName}" saved!`);
+            // Automatically select it
+            setSelectedBackgrounds(prev => [...prev, { ...newBg, id }]);
+          } catch (error) {
+            toast.error("Failed to save background to the database.");
+            console.error(error);
+          }
+        } else {
+          toast.info("Background not saved (name not provided).");
         }
       };
       reader.readAsDataURL(file);
     }
-  }, [savedBackgrounds]);
+  }, []);
 
   const { getRootProps: getBgRootProps, getInputProps: getBgInputProps, isDragActive: isBgDragActive } = useDropzone({
     onDrop: handleBackgroundDrop,
@@ -116,57 +119,94 @@ export default function ZipCleaner() {
     multiple: false,
   });
 
-  const selectSavedBackground = (dataUrl: string) => {
-    setBackgroundImage(dataUrl);
-    toast.info("Saved background selected.");
-  };
-
-  const deleteSavedBackground = (name: string) => {
-    const newSavedBackgrounds = savedBackgrounds.filter(bg => bg.name !== name);
-    setSavedBackgrounds(newSavedBackgrounds);
-    localStorage.setItem("zip-cleaner-backgrounds", JSON.stringify(newSavedBackgrounds));
-    toast.success(`Background "${name}" deleted.`);
-  };
-
-  const stageMockup = () => {
-    if (!backgroundImage || !foregroundImage || !bgRef.current) return;
-
-    const canvas = document.createElement('canvas');
-    const bgImage = bgRef.current;
-
-    // Create a temporary image to get natural dimensions of the background
-    const tempBgImage = new Image();
-    tempBgImage.src = backgroundImage;
-    tempBgImage.onload = () => {
-      canvas.width = tempBgImage.naturalWidth;
-      canvas.height = tempBgImage.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        toast.error("Could not create canvas context.");
-        return;
+  const toggleSavedBackgroundSelection = (bgToToggle: SavedBackground) => {
+    setSelectedBackgrounds(prevSelected => {
+      const isSelected = prevSelected.some(bg => bg.id === bgToToggle.id);
+      if (isSelected) {
+        return prevSelected.filter(bg => bg.id !== bgToToggle.id);
+      } else {
+        return [...prevSelected, bgToToggle];
       }
+    });
+  };
 
-      const fgImage = new Image();
-      fgImage.src = foregroundImage;
-      fgImage.onload = () => {
-        ctx.drawImage(tempBgImage, 0, 0);
+  const deleteSavedBackground = async (idToDelete: number, name: string) => {
+    try {
+      await db.backgrounds.delete(idToDelete);
+      toast.success(`Background "${name}" deleted.`);
+      // Selection is handled automatically by the live query
+    } catch (error) {
+      toast.error("Failed to delete background.");
+      console.error(error);
+    }
+  };
 
-        // Calculate scaling factor based on displayed size vs natural size
-        const scaleX = tempBgImage.naturalWidth / bgImage.clientWidth;
-        const scaleY = tempBgImage.naturalHeight / bgImage.clientHeight;
+  const stageMockup = async () => {
+    if (selectedBackgrounds.length === 0 || !foregroundImage) {
+      toast.error("Please select at least one background and ensure a foreground image is loaded.");
+      return;
+    }
+    setIsStaging(true);
 
-        ctx.drawImage(
-          fgImage,
-          rndState.x * scaleX,
-          rndState.y * scaleY,
-          rndState.width * scaleX,
-          rndState.height * scaleY
-        );
-        const dataUrl = canvas.toDataURL('image/png');
-        setMockups(prev => [...prev, dataUrl]);
-        toast.success("Mockup staged successfully!");
-      };
-    };
+    try {
+      const newMockups: string[] = [];
+      for (const bg of selectedBackgrounds) {
+        if (!bg.id) continue;
+
+        const canvas = document.createElement('canvas');
+        const tempBgImage = new Image();
+        tempBgImage.src = bg.dataUrl;
+
+        await new Promise<void>((resolve, reject) => {
+          tempBgImage.onload = () => {
+            canvas.width = tempBgImage.naturalWidth;
+            canvas.height = tempBgImage.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              reject(new Error("Canvas context not available."));
+              return;
+            }
+
+            const fgImage = new Image();
+            fgImage.src = foregroundImage;
+            fgImage.onload = () => {
+              ctx.drawImage(tempBgImage, 0, 0);
+
+              const currentRndState = rndStates[bg.id!];
+              const editorImg = editorImageRefs.current[bg.id!];
+
+              if (!currentRndState || !editorImg) {
+                // This case should ideally not happen if an image is selected and rendered
+                console.warn(`Could not find RND state or editor image ref for background ${bg.id}`);
+                resolve(); // Skip this one
+                return;
+              }
+
+              // New scaling logic
+              const scaleFactor = tempBgImage.naturalWidth / editorImg.clientWidth;
+
+              ctx.drawImage(
+                fgImage,
+                currentRndState.x * scaleFactor,
+                currentRndState.y * scaleFactor,
+                currentRndState.width * scaleFactor,
+                currentRndState.height * scaleFactor
+              );
+              newMockups.push(canvas.toDataURL('image/png'));
+              resolve();
+            };
+            fgImage.onerror = () => reject(new Error("Failed to load foreground image."));
+          };
+          tempBgImage.onerror = () => reject(new Error("Failed to load background image."));
+        });
+      }
+      setMockups(prev => [...prev, ...newMockups]);
+      toast.success("Mockups staged successfully!");
+    } catch (error: any) {
+      toast.error(`Error staging mockups: ${error.message}`);
+    } finally {
+      setIsStaging(false);
+    }
   };
 
   const removeStagedMockup = (indexToRemove: number) => {
@@ -223,11 +263,118 @@ export default function ZipCleaner() {
     setSelectedFiles([]);
     setHasPdfs(false);
     // Clear mockup state
-    setBackgroundImage(null);
     setForegroundImage(null);
     setMockups([]);
-    // Do NOT clear savedBackgrounds here, as they are persistent
+    setSelectedBackgrounds([]); // Clear selected backgrounds
+    setRndStates({}); // Clear Rnd states
     toast.info("File and current mockup session cleared.");
+  };
+
+  const cleanZip = async () => {
+    if (!file) {
+      toast.error("Please upload a ZIP file first.");
+      return;
+    }
+
+    const promise = async () => {
+      const zip = await JSZip.loadAsync(file);
+      const newZip = new JSZip();
+
+      // 1. Clean the zip
+      const cleaningPromises: Promise<void>[] = [];
+      zip.forEach((relativePath, zipEntry) => {
+        if (!selectedFiles.includes(zipEntry.name) && !zipEntry.dir) {
+          cleaningPromises.push(
+            zipEntry.async("blob").then((content) => {
+              newZip.file(zipEntry.name, content);
+            })
+          );
+        }
+      });
+      await Promise.all(cleaningPromises);
+
+      const content = await newZip.generateAsync({ type: "blob" });
+      saveAs(content, "cleaned.zip");
+    };
+
+    toast.promise(promise, {
+      loading: "Cleaning ZIP...",
+      success: "Cleaned ZIP downloaded!",
+      error: "Error: Invalid ZIP file or cleaning failed.",
+    });
+  };
+
+  const mergePdfs = async () => {
+    if (!file) {
+      toast.error("Please upload a ZIP file first.");
+      return;
+    }
+    setIsMerging(true);
+
+    const promise = async () => {
+      const zip = await JSZip.loadAsync(file);
+      const pdfFiles = zip.filter((_, file) => file.name.toLowerCase().endsWith(".pdf") && !file.dir);
+
+      pdfFiles.sort((a, b) => {
+        const numA = parseFloat(a.name.replace(/\.pdf$/i, ''));
+        const numB = parseFloat(b.name.replace(/\.pdf$/i, ''));
+        return numA - numB;
+      });
+
+      if (pdfFiles.length === 0) {
+        throw new Error("No PDF files found in the ZIP.");
+      }
+
+      const mergedPdf = await PDFDocument.create();
+
+      for (const pdfFile of pdfFiles) {
+        const pdfBytes = await pdfFile.async("uint8array");
+        const pdf = await PDFDocument.load(pdfBytes);
+        const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => mergedPdf.addPage(page));
+      }
+
+const mergedPdfBytes = await mergedPdf.save();
+const blob = new Blob([new Uint8Array(mergedPdfBytes)], { type: "application/pdf" });
+saveAs(blob, "merged.pdf");
+
+    };
+
+    toast.promise(promise, {
+      loading: "Merging PDFs...",
+      success: "PDFs merged and downloaded!",
+      error: (err) => err.message,
+      finally: () => setIsMerging(false),
+    });
+  };
+
+  const downloadMockups = async () => {
+    if (mockups.length === 0) {
+      toast.error("No mockups staged to download.");
+      return;
+    }
+    setIsProcessing(true);
+
+    const promise = async () => {
+      const newZip = new JSZip();
+      const mockupFolder = newZip.folder("mockups");
+
+      for (let i = 0; i < mockups.length; i++) {
+        const response = await fetch(mockups[i]);
+        const blob = await response.blob();
+        mockupFolder?.file(`mockup_${i + 1}.png`, blob);
+      }
+
+      const content = await newZip.generateAsync({ type: "blob" });
+      saveAs(content, "mockups.zip");
+    };
+
+    toast.promise(promise, {
+      loading: "Preparing mockups...",
+      success: "Mockups downloaded!",
+      error: (err) => err.message || "An error occurred.",
+      finally: () => setIsProcessing(false),
+    });
   };
 
   const cleanMergeAndDownload = async () => {
@@ -298,7 +445,7 @@ export default function ZipCleaner() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 p-4 sm:p-6">
-      <Card className="w-full max-w-3xl rounded-xl border border-gray-200 bg-white p-4 space-y-6">
+      <Card className="w-full rounded-xl border border-gray-200 bg-white p-4 space-y-6">
         {/* HEADER */}
         <div className="text-center">
           <h1 className="text-3xl font-bold tracking-tight text-blue-800 md:text-4xl">
@@ -309,46 +456,113 @@ export default function ZipCleaner() {
           </p>
         </div>
 
-        {/* FILE UPLOAD */}
-        <div>
-          {!file ? (
-            <div
-              {...getRootProps()}
-              className={cn(
-                "flex min-h-[150px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 text-center transition-all duration-200 hover:border-blue-400 hover:bg-blue-50",
-                isDragActive
-                  ? "border-blue-500 bg-blue-50"
-                  : "border-gray-300 bg-white"
+        <div className="flex flex-col lg:flex-row gap-6">
+          {/* Left Column: Core Functionality */}
+          <div className="flex-1 space-y-6">
+            <h2 className="text-xl font-semibold text-gray-800 border-b pb-2">📦 Core ZIP Functions</h2>
+
+            {/* File Upload */}
+            <div>
+              {!file ? (
+                <div
+                  {...getRootProps()}
+                  className={cn(
+                    "flex min-h-[150px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 text-center transition-all duration-200 hover:border-blue-400 hover:bg-blue-50",
+                    isDragActive
+                      ? "border-blue-500 bg-blue-50"
+                      : "border-gray-300 bg-white"
+                  )}
+                >
+                  <input {...getInputProps()} />
+                  <UploadCloud className="mx-auto h-12 w-12 text-blue-500" />
+                  <p className="mt-3 text-sm text-gray-600">
+                    {isDragActive
+                      ? "Drop your ZIP here..."
+                      : "Drag & drop a ZIP file here, or click to select one"}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400">(Must contain files to clean/merge and optionally one PNG for mockups)</p>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 p-3">
+                  <div className="flex items-center gap-3">
+                    <FileIcon className="h-5 w-5 text-blue-600" />
+                    <span className="truncate text-sm font-medium text-blue-900">
+                      {file.name}
+                    </span>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={clearFile} className="text-red-500 hover:text-red-600">
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
               )}
-            >
-              <input {...getInputProps()} />
-              <UploadCloud className="mx-auto h-12 w-12 text-blue-500" />
-              <p className="mt-3 text-sm text-gray-600">
-                {isDragActive
-                  ? "Drop your ZIP here..."
-                  : "Drag & drop a ZIP file here, or click to select one"}
-              </p>
-              <p className="mt-1 text-xs text-gray-400">(Must contain files to clean/merge and optionally one PNG for mockups)</p>
             </div>
-          ) : (
-            <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 p-3">
-              <div className="flex items-center gap-3">
-                <FileIcon className="h-5 w-5 text-blue-600" />
-                <span className="truncate text-sm font-medium text-blue-900">
-                  {file.name}
-                </span>
+
+            {/* FILE SELECTOR */}
+            {zipFiles.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+                  <label className="text-base font-medium text-gray-700">
+                    Select files to exclude from ZIP
+                  </label>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={removeAll}
+                      disabled={selectedFiles.length === 0}
+                      className="text-sm"
+                    >
+                      Remove All
+                    </Button>
+                    <Button
+                      onClick={saveFilter}
+                      disabled={selectedFiles.length === 0}
+                      className="text-sm"
+                    >
+                      Save Filter
+                    </Button>
+                  </div>
+                </div>
+                <MultiSelect
+                  options={zipFiles}
+                  selected={selectedFiles}
+                  onChange={setSelectedFiles}
+                />
               </div>
-              <Button variant="ghost" size="sm" onClick={clearFile} className="text-red-500 hover:text-red-600">
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
-        </div>
-        
-        {/* MOCKUP SECTION */}
-        <div className="space-y-4">
+            )}
+
+            {/* SAVED FILTERS */}
+            {Object.keys(savedFilters).length > 0 && (
+              <div className="space-y-3">
+                <h3 className="font-medium text-gray-700">💾 Saved Filters</h3>
+                <div className="flex flex-wrap gap-3">
+                  {Object.keys(savedFilters).map((filterName) => (
+                    <div
+                      key={filterName}
+                      className="flex items-center gap-2 rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm shadow-sm transition-all duration-200 hover:bg-gray-200"
+                    >
+                      <button
+                        onClick={() => applyFilter(filterName)}
+                        className="font-medium text-blue-700 hover:text-blue-800"
+                      >
+                        {filterName}
+                      </button>
+                      <button
+                        onClick={() => deleteFilter(filterName)}
+                        className="text-gray-500 hover:text-red-500"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Column: Mockup Generator */}
+          <div className="flex-1 space-y-6">
             <h2 className="text-xl font-semibold text-gray-800 border-b pb-2">🖼️ Mockup Generator</h2>
-            
+
             {/* Background Uploader */}
             <div className="space-y-2">
                 <label className="font-medium text-gray-700">1. Upload or Select Background Image</label>
@@ -372,23 +586,29 @@ export default function ZipCleaner() {
             </div>
 
             {/* Saved Backgrounds */}
-            {savedBackgrounds.length > 0 && (
+            {savedBackgrounds && savedBackgrounds.length > 0 && (
               <div className="space-y-2">
                 <h3 className="font-medium text-gray-700">Saved Backgrounds</h3>
                 <div className="flex flex-wrap gap-3 p-2 border rounded-lg bg-gray-50">
                   {savedBackgrounds.map((bg, index) => (
-                    <div key={index} className="relative group">
-                      <img 
-                        src={bg.dataUrl} 
-                        alt={bg.name || `Background ${index + 1}`} 
-                        className="w-24 h-24 object-cover border rounded-md shadow-sm cursor-pointer"
-                        onClick={() => selectSavedBackground(bg.dataUrl)}
+                    <div
+                      key={bg.id}
+                      className={cn(
+                        "relative group border-2 rounded-md shadow-sm cursor-pointer",
+                        selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-blue-500" : "border-gray-200"
+                      )}
+                    >
+                      <img
+                        src={bg.dataUrl}
+                        alt={bg.name || `Background ${index + 1}`}
+                        className="w-24 h-24 object-cover rounded-md"
+                        onClick={() => toggleSavedBackgroundSelection(bg)}
                       />
                       <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
                         {bg.name}
                       </span>
                       <button
-                        onClick={() => deleteSavedBackground(bg.name)}
+                        onClick={(e) => { e.stopPropagation(); deleteSavedBackground(bg.id!, bg.name); }}
                         className="absolute top-0 right-0 bg-red-500 text-white rounded-full size-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Delete background"
                       >
@@ -401,43 +621,76 @@ export default function ZipCleaner() {
             )}
 
             {/* Editor */}
-            {backgroundImage && foregroundImage && (
+            {selectedBackgrounds.length > 0 && foregroundImage && (
               <div className="space-y-4">
                 <h3 className="font-medium text-gray-700">2. Position & Resize Foreground</h3>
-                <div className="relative w-full border rounded-lg overflow-hidden" style={{ minHeight: '300px' }}>
-                  <img ref={bgRef} src={backgroundImage} alt="Background" className="w-full h-auto" />
-                  <Rnd
-                    size={{ width: rndState.width, height: rndState.height }}
-                    position={{ x: rndState.x, y: rndState.y }}
-                    onDragStop={(e, d) => setRndState(prev => ({ ...prev, x: d.x, y: d.y }))}
-                    onResizeStop={(e, direction, ref, delta, position) => {
-                      setRndState({
-                        width: parseInt(ref.style.width),
-                        height: parseInt(ref.style.height),
-                        ...position,
-                      });
-                    }}
-                    bounds="parent"
-                    resizeHandleClasses={{
-                      bottom: "rnd-handle-bottom",
-                      bottomLeft: "rnd-handle-bottom-left",
-                      bottomRight: "rnd-handle-bottom-right",
-                      left: "rnd-handle-left",
-                      right: "rnd-handle-right",
-                      top: "rnd-handle-top",
-                      topLeft: "rnd-handle-top-left",
-                      topRight: "rnd-handle-top-right",
-                    }}
-                    style={{
-                      border: "1px dashed #007bff",
-                      boxSizing: "border-box",
-                    }}
-                  >
-                    <img src={foregroundImage} alt="Foreground" className="w-full h-full pointer-events-none" />
-                  </Rnd>
+                <div className="flex flex-wrap gap-4 justify-center">
+                  {selectedBackgrounds.map((bg) => (
+                    <div key={bg.id} className="relative border rounded-lg overflow-hidden max-w-sm w-full" style={{ minHeight: '200px' }}>
+                      <img
+                        ref={(el) => { editorImageRefs.current[bg.id!] = el; }}
+                        src={bg.dataUrl}
+                        alt={bg.name}
+                        className="w-full h-auto"
+                        onLoad={(e) => {
+                          if (!rndStates[bg.id!]) {
+                            const img = e.currentTarget;
+                            const initialWidth = 200;
+                            const initialHeight = 200;
+                            const x = (img.clientWidth - initialWidth) / 2;
+                            const y = (img.clientHeight - initialHeight) / 2;
+
+                            setRndStates(prev => ({
+                              ...prev,
+                              [bg.id!]: {
+                                width: initialWidth,
+                                height: initialHeight,
+                                x: x > 0 ? x : 0,
+                                y: y > 0 ? y : 0,
+                              }
+                            }));
+                          }
+                        }}
+                      />
+                      {rndStates[bg.id!] && (
+                        <Rnd
+                          size={{ width: rndStates[bg.id!].width, height: rndStates[bg.id!].height }}
+                          position={{ x: rndStates[bg.id!].x, y: rndStates[bg.id!].y }}
+                          onDragStop={(e, d) => setRndStates(prev => ({ ...prev, [bg.id!]: { ...prev[bg.id!], x: d.x, y: d.y } }))}
+                          onResizeStop={(e, direction, ref, delta, position) => {
+                            setRndStates(prev => ({
+                              ...prev,
+                              [bg.id!]: {
+                                width: parseInt(ref.style.width),
+                                height: parseInt(ref.style.height),
+                                ...position,
+                              }
+                            }));
+                          }}
+                          bounds="parent"
+                          resizeHandleClasses={{
+                            bottom: "rnd-handle-bottom",
+                            bottomLeft: "rnd-handle-bottom-left",
+                            bottomRight: "rnd-handle-bottom-right",
+                            left: "rnd-handle-left",
+                            right: "rnd-handle-right",
+                            top: "rnd-handle-top",
+                            topLeft: "rnd-handle-top-left",
+                            topRight: "rnd-handle-top-right",
+                          }}
+                          style={{
+                            border: "1px dashed #007bff",
+                            boxSizing: "border-box",
+                          }}
+                        >
+                          <img src={foregroundImage} alt="Foreground" className="w-full h-full pointer-events-none" />
+                        </Rnd>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                <Button onClick={stageMockup} disabled={!backgroundImage || !foregroundImage}>
-                  Add to Staged Mockups
+                <Button onClick={stageMockup} disabled={!selectedBackgrounds || selectedBackgrounds.length === 0 || !foregroundImage || isStaging}>
+                  {isStaging ? "Staging..." : "Add All to Staged Mockups"}
                 </Button>
               </div>
             )}
@@ -449,9 +702,9 @@ export default function ZipCleaner() {
                 <div className="flex flex-wrap gap-4 p-2 border rounded-lg bg-gray-50">
                   {mockups.map((mockup, index) => (
                     <div key={index} className="relative group">
-                      <img 
-                        src={mockup} 
-                        alt={`Mockup ${index + 1}`} 
+                      <img
+                        src={mockup}
+                        alt={`Mockup ${index + 1}`}
                         className="w-24 h-24 object-cover border rounded-md shadow-sm"
                       />
                       <button
@@ -466,12 +719,36 @@ export default function ZipCleaner() {
                 </div>
               </div>
             )}
+          </div>
         </div>
 
-
-        {/* ACTIONS */}
+        {/* ACTIONS - Spanning both columns */}
         <div className="flex flex-col items-center gap-4 pt-4 border-t">
           <div className="flex flex-wrap justify-center gap-4">
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={cleanZip}
+              disabled={!file || isProcessing}
+            >
+              🚀 Clean and Download ZIP
+            </Button>
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={mergePdfs}
+              disabled={!file || !hasPdfs || isMerging || isProcessing}
+            >
+              📄 Merge PDFs
+            </Button>
+            <Button
+              className="px-6 py-3 text-base font-semibold tracking-wide"
+              size="lg"
+              onClick={downloadMockups}
+              disabled={mockups.length === 0 || isProcessing}
+            >
+              🖼️ Download Mockups
+            </Button>
             <Button
               className="px-6 py-3 text-base font-semibold tracking-wide"
               size="lg"
@@ -486,69 +763,6 @@ export default function ZipCleaner() {
             100% private. No uploads. No servers.
           </p>
         </div>
-
-        {/* FILE SELECTOR */}
-        {zipFiles.length > 0 && (
-          <div className="mt-8 space-y-4">
-            <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-              <label className="text-base font-medium text-gray-700">
-                Select files to exclude from ZIP
-              </label>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={removeAll}
-                  disabled={selectedFiles.length === 0}
-                  className="text-sm"
-                >
-                  Remove All
-                </Button>
-                <Button
-                  onClick={saveFilter}
-                  disabled={selectedFiles.length === 0}
-                  className="text-sm"
-                >
-                  Save Filter
-                </Button>
-              </div>
-            </div>
-            <MultiSelect
-              options={zipFiles}
-              selected={selectedFiles}
-              onChange={setSelectedFiles}
-            />
-          </div>
-        )}
-
-        {/* SAVED FILTERS */}
-        {Object.keys(savedFilters).length > 0 && (
-          <div className="mt-8 space-y-3">
-            <h3 className="text-base font-semibold text-gray-700">
-              💾 Saved Filters
-            </h3>
-            <div className="flex flex-wrap gap-3">
-              {Object.keys(savedFilters).map((filterName) => (
-                <div
-                  key={filterName}
-                  className="flex items-center gap-2 rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm shadow-sm transition-all duration-200 hover:bg-gray-200"
-                >
-                  <button
-                    onClick={() => applyFilter(filterName)}
-                    className="font-medium text-blue-700 hover:text-blue-800"
-                  >
-                    {filterName}
-                  </button>
-                  <button
-                    onClick={() => deleteFilter(filterName)}
-                    className="text-gray-500 hover:text-red-500"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </Card>
     </div>
   );
