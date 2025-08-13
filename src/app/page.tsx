@@ -9,6 +9,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { saveAs } from "file-saver";
 import JSZip from "jszip";
 import { File as FileIcon, Image as ImageIcon, ShieldCheck, UploadCloud, X } from "lucide-react";
+import Image from "next/image";
 import { PDFDocument } from "pdf-lib";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
@@ -35,9 +36,9 @@ export default function ZipCleaner() {
 
   // Text Mockup State
   const [mockupText, setMockupText] = useState("Your Text Here");
-  const [mockupFont, setMockupFont] = useState("Arial");
-  const [mockupColor, setMockupColor] = useState("#000000");
-  const [mockupFontSize, setMockupFontSize] = useState(24);
+  const [mockupFont] = useState("Arial");
+  const [mockupColor] = useState("#000000");
+  const [mockupFontSize] = useState(24);
 
   // Saved backgrounds state (now from Dexie)
   const savedBackgrounds = useLiveQuery(() => db.backgrounds.toArray(), []);
@@ -188,7 +189,7 @@ export default function ZipCleaner() {
         if (!bg.id) continue;
 
         const canvas = document.createElement('canvas');
-        const tempBgImage = new Image();
+        const tempBgImage = new window.Image();
         tempBgImage.src = bg.dataUrl;
 
         await new Promise<void>((resolve, reject) => {
@@ -200,7 +201,7 @@ export default function ZipCleaner() {
               reject(new Error("Canvas context not available."));
               return;
             }
-            
+
             ctx.drawImage(tempBgImage, 0, 0);
 
             const currentRndState = rndStates[bg.id!];
@@ -215,7 +216,7 @@ export default function ZipCleaner() {
             const scaleFactor = tempBgImage.naturalWidth / editorImg.clientWidth;
 
             if (bg.type === 'image' && foregroundImage) {
-              const fgImage = new Image();
+              const fgImage = new window.Image();
               fgImage.src = foregroundImage;
               fgImage.onload = () => {
                 ctx.drawImage(
@@ -236,33 +237,37 @@ export default function ZipCleaner() {
               ctx.textAlign = 'center';
               ctx.textBaseline = 'middle';
 
-              const text = mockupText;
               const x = (currentRndState.x + currentRndState.width / 2) * scaleFactor;
               const y = (currentRndState.y + currentRndState.height / 2) * scaleFactor;
-              
-              // Simple text wrapping
-              const lines = [];
-              let line = '';
-              const words = text.split(' ');
-              for(let n = 0; n < words.length; n++) {
-                const testLine = line + words[n] + ' ';
-                const metrics = ctx.measureText(testLine);
-                const testWidth = metrics.width;
-                if (testWidth > currentRndState.width * scaleFactor && n > 0) {
-                  lines.push(line);
-                  line = words[n] + ' ';
-                } else {
-                  line = testLine;
+
+              // New logic to handle both user-defined newlines and word wrapping
+              const userLines = mockupText.split('\n');
+              const finalLines = [];
+              const maxWidth = currentRndState.width * scaleFactor;
+
+              for (const userLine of userLines) {
+                let line = '';
+                const words = userLine.split(' ');
+                for (let n = 0; n < words.length; n++) {
+                  const testLine = line + words[n] + ' ';
+                  const metrics = ctx.measureText(testLine);
+                  const testWidth = metrics.width;
+                  if (testWidth > maxWidth && n > 0) {
+                    finalLines.push(line);
+                    line = words[n] + ' ';
+                  } else {
+                    line = testLine;
+                  }
                 }
+                finalLines.push(line);
               }
-              lines.push(line);
 
               const lineHeight = fontSize * 1.2;
-              const totalTextHeight = lines.length * lineHeight;
-              let startY = y - totalTextHeight / 2 + lineHeight / 2;
+              const totalTextHeight = finalLines.length * lineHeight;
+              const startY = y - totalTextHeight / 2 + lineHeight / 2;
 
-              for(let i = 0; i < lines.length; i++) {
-                ctx.fillText(lines[i], x, startY + (i * lineHeight));
+              for (let i = 0; i < finalLines.length; i++) {
+                ctx.fillText(finalLines[i].trim(), x, startY + (i * lineHeight));
               }
 
               newMockups.push(canvas.toDataURL('image/png'));
@@ -685,14 +690,6 @@ saveAs(blob, "merged.pdf");
               </div>
             </div>
 
-            {/* Text Input Fields */}
-            <div className="space-y-2">
-              <label className="font-medium text-gray-700">3. Enter Your Text</label>
-              <div className="grid grid-cols-1">
-                <p className="text-sm text-muted-foreground">You can now edit the text directly on the backgrounds in the editor below.</p>
-              </div>
-            </div>
-
             {/* Saved Backgrounds */}
             {savedBackgrounds && savedBackgrounds.length > 0 && (
               <div className="space-y-2">
@@ -705,15 +702,17 @@ saveAs(blob, "merged.pdf");
                       <div
                         key={bg.id}
                         className={cn(
-                          "relative group border-2 rounded-md shadow-sm cursor-pointer",
+                          "relative group border-2 rounded-md shadow-sm cursor-pointer w-24 h-24",
                           selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-blue-500" : "border-gray-200"
                         )}
+                        onClick={() => toggleSavedBackgroundSelection(bg)}
                       >
-                        <img
+                        <Image
                           src={bg.dataUrl}
                           alt={bg.name || `Background ${index + 1}`}
-                          className="w-24 h-24 object-cover rounded-md"
-                          onClick={() => toggleSavedBackgroundSelection(bg)}
+                          layout="fill"
+                          objectFit="cover"
+                          className="rounded-md"
                         />
                         <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
                           {bg.name}
@@ -737,15 +736,17 @@ saveAs(blob, "merged.pdf");
                       <div
                         key={bg.id}
                         className={cn(
-                          "relative group border-2 rounded-md shadow-sm cursor-pointer",
+                          "relative group border-2 rounded-md shadow-sm cursor-pointer w-24 h-24",
                           selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-green-500" : "border-gray-200"
                         )}
+                        onClick={() => toggleSavedBackgroundSelection(bg)}
                       >
-                        <img
+                        <Image
                           src={bg.dataUrl}
                           alt={bg.name || `Background ${index + 1}`}
-                          className="w-24 h-24 object-cover rounded-md"
-                          onClick={() => toggleSavedBackgroundSelection(bg)}
+                          layout="fill"
+                          objectFit="cover"
+                          className="rounded-md"
                         />
                         <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
                           {bg.name}
@@ -886,11 +887,13 @@ saveAs(blob, "merged.pdf");
                 <h3 className="font-medium text-gray-700">5. Staged Mockups</h3>
                 <div className="flex flex-wrap gap-4 p-2 border rounded-lg bg-gray-50">
                   {mockups.map((mockup, index) => (
-                    <div key={index} className="relative group">
-                      <img
+                    <div key={index} className="relative group w-24 h-24">
+                      <Image
                         src={mockup}
                         alt={`Mockup ${index + 1}`}
-                        className="w-24 h-24 object-cover border rounded-md shadow-sm"
+                        layout="fill"
+                        objectFit="cover"
+                        className="border rounded-md shadow-sm"
                       />
                       <button
                         onClick={() => removeStagedMockup(index)}
