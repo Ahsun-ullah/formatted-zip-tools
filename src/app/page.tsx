@@ -33,6 +33,12 @@ export default function ZipCleaner() {
   const editorImageRefs = useRef<Record<string, HTMLImageElement | null>>({});
   const [isShiftDown, setIsShiftDown] = useState(false);
 
+  // Text Mockup State
+  const [mockupText, setMockupText] = useState("Your Text Here");
+  const [mockupFont, setMockupFont] = useState("Arial");
+  const [mockupColor, setMockupColor] = useState("#000000");
+  const [mockupFontSize, setMockupFontSize] = useState(24);
+
   // Saved backgrounds state (now from Dexie)
   const savedBackgrounds = useLiveQuery(() => db.backgrounds.toArray(), []);
   const [selectedBackgrounds, setSelectedBackgrounds] = useState<SavedBackground[]>([]);
@@ -109,7 +115,7 @@ export default function ZipCleaner() {
     multiple: false,
   });
 
-  const handleBackgroundDrop = useCallback(async (acceptedFiles: File[]) => {
+  const handleBackgroundDrop = useCallback(async (acceptedFiles: File[], type: 'image' | 'text') => {
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
       const reader = new FileReader();
@@ -118,7 +124,7 @@ export default function ZipCleaner() {
         const bgName = prompt("Enter a name for this background:");
         if (bgName) {
           try {
-            const newBg: SavedBackground = { name: bgName, dataUrl };
+            const newBg: SavedBackground = { name: bgName, dataUrl, type };
             const id = await db.backgrounds.add(newBg);
             toast.success(`Background "${bgName}" saved!`);
             // Automatically select it
@@ -135,8 +141,14 @@ export default function ZipCleaner() {
     }
   }, []);
 
-  const { getRootProps: getBgRootProps, getInputProps: getBgInputProps, isDragActive: isBgDragActive } = useDropzone({
-    onDrop: handleBackgroundDrop,
+  const { getRootProps: getImgBgRootProps, getInputProps: getImgBgInputProps, isDragActive: isImgBgDragActive } = useDropzone({
+    onDrop: (files) => handleBackgroundDrop(files, 'image'),
+    accept: { "image/*": [".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp"] },
+    multiple: false,
+  });
+
+  const { getRootProps: getTextBgRootProps, getInputProps: getTextBgInputProps, isDragActive: isTextBgDragActive } = useDropzone({
+    onDrop: (files) => handleBackgroundDrop(files, 'text'),
     accept: { "image/*": [".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp"] },
     multiple: false,
   });
@@ -164,8 +176,8 @@ export default function ZipCleaner() {
   };
 
   const stageMockup = async () => {
-    if (selectedBackgrounds.length === 0 || !foregroundImage) {
-      toast.error("Please select at least one background and ensure a foreground image is loaded.");
+    if (selectedBackgrounds.length === 0) {
+      toast.error("Please select at least one background.");
       return;
     }
     setIsStaging(true);
@@ -188,36 +200,77 @@ export default function ZipCleaner() {
               reject(new Error("Canvas context not available."));
               return;
             }
+            
+            ctx.drawImage(tempBgImage, 0, 0);
 
-            const fgImage = new Image();
-            fgImage.src = foregroundImage;
-            fgImage.onload = () => {
-              ctx.drawImage(tempBgImage, 0, 0);
+            const currentRndState = rndStates[bg.id!];
+            const editorImg = editorImageRefs.current[bg.id!];
 
-              const currentRndState = rndStates[bg.id!];
-              const editorImg = editorImageRefs.current[bg.id!];
+            if (!currentRndState || !editorImg) {
+              console.warn(`Could not find RND state or editor image ref for background ${bg.id}`);
+              resolve();
+              return;
+            }
 
-              if (!currentRndState || !editorImg) {
-                // This case should ideally not happen if an image is selected and rendered
-                console.warn(`Could not find RND state or editor image ref for background ${bg.id}`);
-                resolve(); // Skip this one
-                return;
+            const scaleFactor = tempBgImage.naturalWidth / editorImg.clientWidth;
+
+            if (bg.type === 'image' && foregroundImage) {
+              const fgImage = new Image();
+              fgImage.src = foregroundImage;
+              fgImage.onload = () => {
+                ctx.drawImage(
+                  fgImage,
+                  currentRndState.x * scaleFactor,
+                  currentRndState.y * scaleFactor,
+                  currentRndState.width * scaleFactor,
+                  currentRndState.height * scaleFactor
+                );
+                newMockups.push(canvas.toDataURL('image/png'));
+                resolve();
+              };
+              fgImage.onerror = () => reject(new Error("Failed to load foreground image."));
+            } else if (bg.type === 'text') {
+              const fontSize = mockupFontSize * scaleFactor;
+              ctx.font = `${fontSize}px ${mockupFont}`;
+              ctx.fillStyle = mockupColor;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+
+              const text = mockupText;
+              const x = (currentRndState.x + currentRndState.width / 2) * scaleFactor;
+              const y = (currentRndState.y + currentRndState.height / 2) * scaleFactor;
+              
+              // Simple text wrapping
+              const lines = [];
+              let line = '';
+              const words = text.split(' ');
+              for(let n = 0; n < words.length; n++) {
+                const testLine = line + words[n] + ' ';
+                const metrics = ctx.measureText(testLine);
+                const testWidth = metrics.width;
+                if (testWidth > currentRndState.width * scaleFactor && n > 0) {
+                  lines.push(line);
+                  line = words[n] + ' ';
+                } else {
+                  line = testLine;
+                }
+              }
+              lines.push(line);
+
+              const lineHeight = fontSize * 1.2;
+              const totalTextHeight = lines.length * lineHeight;
+              let startY = y - totalTextHeight / 2 + lineHeight / 2;
+
+              for(let i = 0; i < lines.length; i++) {
+                ctx.fillText(lines[i], x, startY + (i * lineHeight));
               }
 
-              // New scaling logic
-              const scaleFactor = tempBgImage.naturalWidth / editorImg.clientWidth;
-
-              ctx.drawImage(
-                fgImage,
-                currentRndState.x * scaleFactor,
-                currentRndState.y * scaleFactor,
-                currentRndState.width * scaleFactor,
-                currentRndState.height * scaleFactor
-              );
               newMockups.push(canvas.toDataURL('image/png'));
               resolve();
-            };
-            fgImage.onerror = () => reject(new Error("Failed to load foreground image."));
+            } else {
+              // No foreground for this type, or foreground not available
+              resolve();
+            }
           };
           tempBgImage.onerror = () => reject(new Error("Failed to load background image."));
         });
@@ -586,67 +639,135 @@ saveAs(blob, "merged.pdf");
           <div className="flex-1 space-y-6">
             <h2 className="text-xl font-semibold text-gray-800 border-b pb-2">🖼️ Mockup Generator</h2>
 
-            {/* Background Uploader */}
+            {/* Background Uploaders */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Image Background Uploader */}
+              <div className="space-y-2">
+                  <label className="font-medium text-gray-700">1. Upload BG for Image</label>
+                  <div
+                    {...getImgBgRootProps()}
+                    className={cn(
+                      "flex min-h-[100px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-4 text-center transition-all duration-200 hover:border-blue-400 hover:bg-blue-50",
+                      isImgBgDragActive
+                        ? "border-blue-500 bg-blue-50"
+                        : "border-gray-300 bg-white"
+                    )}
+                  >
+                    <input {...getImgBgInputProps()} />
+                    <ImageIcon className="mx-auto h-8 w-8 text-blue-500" />
+                    <p className="mt-2 text-sm text-gray-600">
+                      {isImgBgDragActive
+                        ? "Drop image here..."
+                        : "Upload background for image mockups"}
+                    </p>
+                  </div>
+              </div>
+              {/* Text Background Uploader */}
+              <div className="space-y-2">
+                  <label className="font-medium text-gray-700">2. Upload BG for Text</label>
+                  <div
+                    {...getTextBgRootProps()}
+                    className={cn(
+                      "flex min-h-[100px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-4 text-center transition-all duration-200 hover:border-green-400 hover:bg-green-50",
+                      isTextBgDragActive
+                        ? "border-green-500 bg-green-50"
+                        : "border-gray-300 bg-white"
+                    )}
+                  >
+                    <input {...getTextBgInputProps()} />
+                    <ImageIcon className="mx-auto h-8 w-8 text-green-500" />
+                    <p className="mt-2 text-sm text-gray-600">
+                      {isTextBgDragActive
+                        ? "Drop image here..."
+                        : "Upload background for text mockups"}
+                    </p>
+                  </div>
+              </div>
+            </div>
+
+            {/* Text Input Fields */}
             <div className="space-y-2">
-                <label className="font-medium text-gray-700">1. Upload or Select Background Image</label>
-                <div
-                  {...getBgRootProps()}
-                  className={cn(
-                    "flex min-h-[100px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-4 text-center transition-all duration-200 hover:border-blue-400 hover:bg-blue-50",
-                    isBgDragActive
-                      ? "border-blue-500 bg-blue-50"
-                      : "border-gray-300 bg-white"
-                  )}
-                >
-                  <input {...getBgInputProps()} />
-                  <ImageIcon className="mx-auto h-8 w-8 text-blue-500" />
-                  <p className="mt-2 text-sm text-gray-600">
-                    {isBgDragActive
-                      ? "Drop your image here..."
-                      : "Drag & drop a background image, or click to select one"}
-                  </p>
-                </div>
+              <label className="font-medium text-gray-700">3. Enter Your Text</label>
+              <div className="grid grid-cols-1">
+                <p className="text-sm text-muted-foreground">You can now edit the text directly on the backgrounds in the editor below.</p>
+              </div>
             </div>
 
             {/* Saved Backgrounds */}
             {savedBackgrounds && savedBackgrounds.length > 0 && (
               <div className="space-y-2">
                 <h3 className="font-medium text-gray-700">Saved Backgrounds</h3>
-                <div className="flex flex-wrap gap-3 p-2 border rounded-lg bg-gray-50">
-                  {savedBackgrounds.map((bg, index) => (
-                    <div
-                      key={bg.id}
-                      className={cn(
-                        "relative group border-2 rounded-md shadow-sm cursor-pointer",
-                        selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-blue-500" : "border-gray-200"
-                      )}
-                    >
-                      <img
-                        src={bg.dataUrl}
-                        alt={bg.name || `Background ${index + 1}`}
-                        className="w-24 h-24 object-cover rounded-md"
-                        onClick={() => toggleSavedBackgroundSelection(bg)}
-                      />
-                      <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
-                        {bg.name}
-                      </span>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteSavedBackground(bg.id!, bg.name); }}
-                        className="absolute top-0 right-0 bg-red-500 text-white rounded-full size-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Delete background"
+                {/* Image Backgrounds */}
+                <div className="space-y-2">
+                  <h4 className="font-medium text-gray-600">For Images</h4>
+                  <div className="flex flex-wrap gap-3 p-2 border rounded-lg bg-gray-50">
+                    {savedBackgrounds.filter(bg => bg.type === 'image').map((bg, index) => (
+                      <div
+                        key={bg.id}
+                        className={cn(
+                          "relative group border-2 rounded-md shadow-sm cursor-pointer",
+                          selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-blue-500" : "border-gray-200"
+                        )}
                       >
-                        <X className="size-3" />
-                      </button>
-                    </div>
-                  ))}
+                        <img
+                          src={bg.dataUrl}
+                          alt={bg.name || `Background ${index + 1}`}
+                          className="w-24 h-24 object-cover rounded-md"
+                          onClick={() => toggleSavedBackgroundSelection(bg)}
+                        />
+                        <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
+                          {bg.name}
+                        </span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteSavedBackground(bg.id!, bg.name); }}
+                          className="absolute top-0 right-0 bg-red-500 text-white rounded-full size-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete background"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {/* Text Backgrounds */}
+                <div className="space-y-2">
+                  <h4 className="font-medium text-gray-600">For Text</h4>
+                  <div className="flex flex-wrap gap-3 p-2 border rounded-lg bg-gray-50">
+                    {savedBackgrounds.filter(bg => bg.type === 'text').map((bg, index) => (
+                      <div
+                        key={bg.id}
+                        className={cn(
+                          "relative group border-2 rounded-md shadow-sm cursor-pointer",
+                          selectedBackgrounds.some(sbg => sbg.id === bg.id) ? "border-green-500" : "border-gray-200"
+                        )}
+                      >
+                        <img
+                          src={bg.dataUrl}
+                          alt={bg.name || `Background ${index + 1}`}
+                          className="w-24 h-24 object-cover rounded-md"
+                          onClick={() => toggleSavedBackgroundSelection(bg)}
+                        />
+                        <span className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs text-center truncate px-1 py-0.5 rounded-b-md opacity-0 group-hover:opacity-100 transition-opacity">
+                          {bg.name}
+                        </span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteSavedBackground(bg.id!, bg.name); }}
+                          className="absolute top-0 right-0 bg-red-500 text-white rounded-full size-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete background"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
 
             {/* Editor */}
-            {selectedBackgrounds.length > 0 && foregroundImage && (
+            {selectedBackgrounds.length > 0 && (foregroundImage || mockupText) && (
               <div className="space-y-4">
-                <h3 className="font-medium text-gray-700">2. Position & Resize Foreground</h3>
+                <h3 className="font-medium text-gray-700">4. Position & Resize Foreground</h3>
                 <div className="flex flex-wrap gap-4 justify-center">
                   {selectedBackgrounds.map((bg) => (
                     <div key={bg.id} className="relative border rounded-lg overflow-hidden max-w-sm w-full" style={{ minHeight: '200px' }}>
@@ -658,20 +779,34 @@ saveAs(blob, "merged.pdf");
                         onLoad={(e) => {
                           if (!rndStates[bg.id!]) {
                             const img = e.currentTarget;
-                            const initialWidth = 200;
-                            const initialHeight = 200;
-                            const x = (img.clientWidth - initialWidth) / 2;
-                            const y = (img.clientHeight - initialHeight) / 2;
+                            if (bg.type === 'text') {
+                              // For text, default to full size
+                              setRndStates(prev => ({
+                                ...prev,
+                                [bg.id!]: {
+                                  width: img.clientWidth,
+                                  height: img.clientHeight,
+                                  x: 0,
+                                  y: 0,
+                                }
+                              }));
+                            } else {
+                              // For images, use the original centered box
+                              const initialWidth = 200;
+                              const initialHeight = 200;
+                              const x = (img.clientWidth - initialWidth) / 2;
+                              const y = (img.clientHeight - initialHeight) / 2;
 
-                            setRndStates(prev => ({
-                              ...prev,
-                              [bg.id!]: {
-                                width: initialWidth,
-                                height: initialHeight,
-                                x: x > 0 ? x : 0,
-                                y: y > 0 ? y : 0,
-                              }
-                            }));
+                              setRndStates(prev => ({
+                                ...prev,
+                                [bg.id!]: {
+                                  width: initialWidth,
+                                  height: initialHeight,
+                                  x: x > 0 ? x : 0,
+                                  y: y > 0 ? y : 0,
+                                }
+                              }));
+                            }
                           }
                         }}
                       />
@@ -692,6 +827,7 @@ saveAs(blob, "merged.pdf");
                             }));
                           }}
                           bounds="parent"
+                          cancel=".editable-text" // Prevent dragging on the text itself
                           resizeHandleClasses={{
                             bottom: "rnd-handle-bottom",
                             bottomLeft: "rnd-handle-bottom-left",
@@ -707,13 +843,38 @@ saveAs(blob, "merged.pdf");
                             boxSizing: "border-box",
                           }}
                         >
-                          <img src={foregroundImage} alt="Foreground" className="w-full h-full pointer-events-none" />
+                          {bg.type === 'image' && foregroundImage ? (
+                            <img src={foregroundImage} alt="Foreground" className="w-full h-full pointer-events-none" />
+                          ) : bg.type === 'text' ? (
+                            <div
+                              className="editable-text" // Add class for the cancel prop
+                              contentEditable={true}
+                              suppressContentEditableWarning={true}
+                              onInput={(e) => setMockupText(e.currentTarget.textContent || "")}
+                              style={{
+                                color: mockupColor,
+                                fontSize: `${mockupFontSize}px`,
+                                fontFamily: mockupFont,
+                                width: '100%',
+                                height: '100%',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                textAlign: 'center',
+                                wordBreak: 'break-word',
+                                whiteSpace: 'pre-wrap',
+                                outline: 'none',
+                              }}
+                            >
+                              {mockupText}
+                            </div>
+                          ) : null}
                         </Rnd>
                       )}
                     </div>
                   ))}
                 </div>
-                <Button onClick={stageMockup} disabled={!selectedBackgrounds || selectedBackgrounds.length === 0 || !foregroundImage || isStaging}>
+                <Button onClick={stageMockup} disabled={!selectedBackgrounds || selectedBackgrounds.length === 0 || isStaging}>
                   {isStaging ? "Staging..." : "Add All to Staged Mockups"}
                 </Button>
               </div>
@@ -722,7 +883,7 @@ saveAs(blob, "merged.pdf");
             {/* Staged Mockups */}
             {mockups.length > 0 && (
               <div className="space-y-2">
-                <h3 className="font-medium text-gray-700">3. Staged Mockups</h3>
+                <h3 className="font-medium text-gray-700">5. Staged Mockups</h3>
                 <div className="flex flex-wrap gap-4 p-2 border rounded-lg bg-gray-50">
                   {mockups.map((mockup, index) => (
                     <div key={index} className="relative group">
