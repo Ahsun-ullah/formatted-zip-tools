@@ -231,7 +231,6 @@ export default function ZipCleaner() {
               fgImage.src = foregroundImage;
               fgImage.onload = () => {
                 ctx.imageSmoothingEnabled = true;
-                // @ts-ignore
                 ctx.imageSmoothingQuality = 'high';
                 ctx.drawImage(
                   fgImage,
@@ -296,8 +295,8 @@ export default function ZipCleaner() {
       }
       setMockups(prev => [...prev, ...newMockups]);
       toast.success("Mockups staged successfully!");
-    } catch (error: any) {
-      toast.error(`Error staging mockups: ${error.message}`);
+    } catch (error) {
+      toast.error(`Error staging mockups: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsStaging(false);
     }
